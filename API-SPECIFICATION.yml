@@ -1,0 +1,1433 @@
+openapi: 3.0.3
+info:
+  title: Order and Return Management System API
+  description: |
+    Complete API for managing orders, returns, payments, and invoices.
+    
+    ## Features
+    - Order lifecycle management with state machine
+    - Return workflow management
+    - Payment processing
+    - Automatic invoice generation (PDF)
+    - Credit memo generation for returns
+    
+    ## State Machines
+    - **Orders**: PENDING → CONFIRMED → PROCESSING → SHIPPED → DELIVERED
+    - **Returns**: INITIATED → APPROVED → PICKUP_SCHEDULED → IN_TRANSIT → RECEIVED → PROCESSED → REFUNDED
+    
+    ## Invoice Generation
+    - Order invoices are automatically generated when order is shipped
+    - Return credit memos are automatically generated when return is processed
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+  - url: https://api.example.com
+    description: Production server
+
+tags:
+  - name: orders
+    description: Order management endpoints
+  - name: returns
+    description: Return management endpoints
+  - name: payments
+    description: Payment processing endpoints
+  - name: invoices
+    description: Invoice and credit memo endpoints
+  - name: health
+    description: System health check
+
+paths:
+  /:
+    get:
+      tags:
+        - health
+      summary: Root endpoint
+      description: Returns API information
+      responses:
+        '200':
+          description: API information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Order Management System API
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  docs:
+                    type: string
+                    example: /docs
+
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check
+      description: Check if the API is running
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+
+  /api/v1/orders:
+    post:
+      tags:
+        - orders
+      summary: Create a new order
+      description: |
+        Create a new order with items. The order will be created in PENDING status.
+        At least one item is required.
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreate'
+            example:
+              customer_id: 1
+              customer_email: customer@example.com
+              customer_name: John Doe
+              items:
+                - product_id: 101
+                  product_name: "Product A"
+                  product_sku: "SKU-001"
+                  unit_price: 100.00
+                  quantity: 2
+                - product_id: 102
+                  product_name: "Product B"
+                  product_sku: "SKU-002"
+                  unit_price: 50.00
+                  quantity: 1
+              shipping_address:
+                street: "123 Main St"
+                city: "New York"
+                state: "NY"
+                zip: "10001"
+                country: "USA"
+              billing_address:
+                street: "123 Main St"
+                city: "New York"
+                state: "NY"
+                zip: "10001"
+                country: "USA"
+              notes: "Please handle with care"
+      responses:
+        '201':
+          description: Order created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      tags:
+        - orders
+      summary: List orders
+      description: Get a list of orders with optional filters
+      operationId: listOrders
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: customer_id
+          in: query
+          description: Filter by customer ID
+          required: false
+          schema:
+            type: integer
+        - name: status
+          in: query
+          description: Filter by order status
+          required: false
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+      responses:
+        '200':
+          description: List of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrderResponse'
+
+  /api/v1/orders/{order_id}:
+    get:
+      tags:
+        - orders
+      summary: Get order by ID
+      description: Retrieve a specific order by its ID
+      operationId: getOrder
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          description: Order ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Order details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - orders
+      summary: Update order
+      description: Update order details (notes, metadata)
+      operationId: updateOrder
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          description: Order ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderUpdate'
+            example:
+              notes: "Updated notes"
+              meta_data:
+                custom_field: "value"
+      responses:
+        '200':
+          description: Order updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orders/{order_id}/state:
+    post:
+      tags:
+        - orders
+      summary: Update order state
+      description: |
+        Transition order to a new state using state machine.
+        
+        Valid actions:
+        - `confirm`: PENDING → CONFIRMED
+        - `start_processing`: CONFIRMED → PROCESSING
+        - `ship`: PROCESSING → SHIPPED (triggers invoice generation)
+        - `deliver`: SHIPPED → DELIVERED
+        - `return_order`: DELIVERED → RETURNED
+        - `cancel`: PENDING/PROCESSING → CANCELLED
+      operationId: updateOrderState
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          description: Order ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderStateUpdate'
+            example:
+              action: "ship"
+      responses:
+        '200':
+          description: Order state updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orders/{order_id}/cancel:
+    post:
+      tags:
+        - orders
+      summary: Cancel order
+      description: Cancel an order (convenience endpoint)
+      operationId: cancelOrder
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          description: Order ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Order cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/returns:
+    post:
+      tags:
+        - returns
+      summary: Create a new return request
+      description: |
+        Create a return request for an order.
+        The order must be in DELIVERED or RETURNED status.
+      operationId: createReturn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReturnCreate'
+            example:
+              order_id: 1
+              reason: "defective"
+              reason_description: "Product arrived damaged"
+              items:
+                - order_item_id: 1
+                  product_id: 101
+                  product_name: "Product A"
+                  product_sku: "SKU-001"
+                  quantity: 1
+                  condition: "damaged"
+                  condition_notes: "Box was crushed"
+              return_address:
+                street: "456 Return St"
+                city: "New York"
+                state: "NY"
+                zip: "10001"
+              notes: "Please inspect carefully"
+      responses:
+        '201':
+          description: Return created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    get:
+      tags:
+        - returns
+      summary: List returns
+      description: Get a list of returns with optional filters
+      operationId: listReturns
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: order_id
+          in: query
+          description: Filter by order ID
+          required: false
+          schema:
+            type: integer
+        - name: status
+          in: query
+          description: Filter by return status
+          required: false
+          schema:
+            $ref: '#/components/schemas/ReturnStatus'
+      responses:
+        '200':
+          description: List of returns
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReturnResponse'
+
+  /api/v1/returns/{return_id}:
+    get:
+      tags:
+        - returns
+      summary: Get return by ID
+      description: Retrieve a specific return by its ID
+      operationId: getReturn
+      parameters:
+        - name: return_id
+          in: path
+          required: true
+          description: Return ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Return details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - returns
+      summary: Update return
+      description: Update return details (notes, tracking number, metadata)
+      operationId: updateReturn
+      parameters:
+        - name: return_id
+          in: path
+          required: true
+          description: Return ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReturnUpdate'
+            example:
+              tracking_number: "TRACK123456"
+              notes: "Updated tracking information"
+      responses:
+        '200':
+          description: Return updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/returns/{return_id}/state:
+    post:
+      tags:
+        - returns
+      summary: Update return state
+      description: |
+        Transition return to a new state using state machine.
+        
+        Valid actions:
+        - `approve`: INITIATED → APPROVED
+        - `schedule_pickup`: APPROVED → PICKUP_SCHEDULED
+        - `start_transit`: PICKUP_SCHEDULED → IN_TRANSIT
+        - `receive`: IN_TRANSIT → RECEIVED
+        - `process`: RECEIVED → PROCESSED (triggers credit memo generation)
+        - `refund`: PROCESSED → REFUNDED
+        - `reject`: INITIATED/APPROVED → REJECTED (requires reason)
+        - `cancel`: INITIATED/APPROVED → CANCELLED
+      operationId: updateReturnState
+      parameters:
+        - name: return_id
+          in: path
+          required: true
+          description: Return ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReturnStateUpdate'
+            example:
+              action: "process"
+              reason: null
+      responses:
+        '200':
+          description: Return state updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/returns/{return_id}/approve:
+    post:
+      tags:
+        - returns
+      summary: Approve return
+      description: Approve a return request (convenience endpoint)
+      operationId: approveReturn
+      parameters:
+        - name: return_id
+          in: path
+          required: true
+          description: Return ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Return approved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/returns/{return_id}/reject:
+    post:
+      tags:
+        - returns
+      summary: Reject return
+      description: Reject a return request
+      operationId: rejectReturn
+      parameters:
+        - name: return_id
+          in: path
+          required: true
+          description: Return ID
+          schema:
+            type: integer
+        - name: reason
+          in: query
+          required: true
+          description: Rejection reason
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Return rejected successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/payments:
+    post:
+      tags:
+        - payments
+      summary: Create a new payment
+      description: Create a payment record for an order
+      operationId: createPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentCreate'
+            example:
+              order_id: 1
+              method: "credit_card"
+              amount: 1105.00
+              currency: "USD"
+              transaction_id: "TXN123456"
+      responses:
+        '201':
+          description: Payment created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    get:
+      tags:
+        - payments
+      summary: List payments
+      description: Get a list of payments with optional filters
+      operationId: listPayments
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: order_id
+          in: query
+          description: Filter by order ID
+          required: false
+          schema:
+            type: integer
+        - name: status
+          in: query
+          description: Filter by payment status
+          required: false
+          schema:
+            $ref: '#/components/schemas/PaymentStatus'
+      responses:
+        '200':
+          description: List of payments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentResponse'
+
+  /api/v1/payments/{payment_id}:
+    get:
+      tags:
+        - payments
+      summary: Get payment by ID
+      description: Retrieve a specific payment by its ID
+      operationId: getPayment
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          description: Payment ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Payment details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - payments
+      summary: Update payment
+      description: Update payment details
+      operationId: updatePayment
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          description: Payment ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentUpdate'
+            example:
+              transaction_id: "TXN123456"
+              gateway_response:
+                status: "success"
+                authorization_code: "AUTH123"
+      responses:
+        '200':
+          description: Payment updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/payments/{payment_id}/process:
+    post:
+      tags:
+        - payments
+      summary: Process payment
+      description: Process a pending payment
+      operationId: processPayment
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          description: Payment ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Payment processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/payments/{payment_id}/refund:
+    post:
+      tags:
+        - payments
+      summary: Process refund
+      description: Process a refund for a payment (full or partial)
+      operationId: refundPayment
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          description: Payment ID
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundRequest'
+            example:
+              amount: 500.00
+              reason: "Customer requested partial refund"
+      responses:
+        '200':
+          description: Refund processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/invoices/order/{order_id}:
+    get:
+      tags:
+        - invoices
+      summary: Get invoices for an order
+      description: Get all invoices (PDFs) generated for a specific order
+      operationId: getOrderInvoices
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          description: Order ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: List of invoices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InvoiceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/invoices/return/{return_id}:
+    get:
+      tags:
+        - invoices
+      summary: Get credit memos for a return
+      description: Get all credit memos (PDFs) generated for a specific return
+      operationId: getReturnInvoices
+      parameters:
+        - name: return_id
+          in: path
+          required: true
+          description: Return ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: List of credit memos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InvoiceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/invoices/{invoice_id}:
+    get:
+      tags:
+        - invoices
+      summary: Get invoice details
+      description: Get invoice metadata by invoice ID
+      operationId: getInvoice
+      parameters:
+        - name: invoice_id
+          in: path
+          required: true
+          description: Invoice ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Invoice details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/invoices/{invoice_id}/download:
+    get:
+      tags:
+        - invoices
+      summary: Download invoice PDF
+      description: Download the PDF file for an invoice or credit memo
+      operationId: downloadInvoice
+      parameters:
+        - name: invoice_id
+          in: path
+          required: true
+          description: Invoice ID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: PDF file
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  schemas:
+    OrderStatus:
+      type: string
+      enum:
+        - pending
+        - confirmed
+        - processing
+        - shipped
+        - delivered
+        - cancelled
+        - returned
+      description: Order status values
+
+    ReturnStatus:
+      type: string
+      enum:
+        - initiated
+        - approved
+        - rejected
+        - pickup_scheduled
+        - in_transit
+        - received
+        - processed
+        - refunded
+        - cancelled
+      description: Return status values
+
+    ReturnReason:
+      type: string
+      enum:
+        - defective
+        - wrong_item
+        - not_as_described
+        - damaged
+        - size_issue
+        - change_of_mind
+        - other
+      description: Return reason values
+
+    PaymentStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - completed
+        - failed
+        - refunded
+        - partially_refunded
+        - cancelled
+      description: Payment status values
+
+    PaymentMethod:
+      type: string
+      enum:
+        - credit_card
+        - debit_card
+        - paypal
+        - bank_transfer
+        - stripe
+        - other
+      description: Payment method values
+
+    InvoiceType:
+      type: string
+      enum:
+        - order
+        - return
+      description: Invoice type values
+
+    OrderItemCreate:
+      type: object
+      required:
+        - product_id
+        - product_name
+        - product_sku
+        - unit_price
+        - quantity
+      properties:
+        product_id:
+          type: integer
+          description: Product identifier
+        product_name:
+          type: string
+          description: Product name
+        product_sku:
+          type: string
+          description: Product SKU
+        unit_price:
+          type: number
+          format: decimal
+          description: Price per unit
+        quantity:
+          type: integer
+          minimum: 1
+          description: Item quantity
+        meta_data:
+          type: object
+          description: Additional metadata
+
+    OrderItemResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        product_id:
+          type: integer
+        product_name:
+          type: string
+        product_sku:
+          type: string
+        unit_price:
+          type: number
+          format: decimal
+        quantity:
+          type: integer
+        total_price:
+          type: number
+          format: decimal
+        meta_data:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+
+    OrderCreate:
+      type: object
+      required:
+        - customer_id
+        - customer_email
+        - customer_name
+        - items
+        - shipping_address
+        - billing_address
+      properties:
+        customer_id:
+          type: integer
+          description: Customer identifier
+        customer_email:
+          type: string
+          format: email
+          description: Customer email address
+        customer_name:
+          type: string
+          description: Customer name
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItemCreate'
+          description: Order items (at least one required)
+        shipping_address:
+          type: object
+          description: Shipping address
+        billing_address:
+          type: object
+          description: Billing address
+        notes:
+          type: string
+          description: Order notes
+        meta_data:
+          type: object
+          description: Additional metadata
+
+    OrderUpdate:
+      type: object
+      properties:
+        notes:
+          type: string
+        meta_data:
+          type: object
+
+    OrderStateUpdate:
+      type: object
+      required:
+        - action
+      properties:
+        action:
+          type: string
+          description: State transition action (confirm, start_processing, ship, deliver, return_order, cancel)
+          enum:
+            - confirm
+            - start_processing
+            - ship
+            - deliver
+            - return_order
+            - cancel
+        meta_data:
+          type: object
+
+    OrderResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        order_number:
+          type: string
+        customer_id:
+          type: integer
+        customer_email:
+          type: string
+        customer_name:
+          type: string
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        previous_status:
+          $ref: '#/components/schemas/OrderStatus'
+        subtotal:
+          type: number
+          format: decimal
+        tax:
+          type: number
+          format: decimal
+        shipping_cost:
+          type: number
+          format: decimal
+        total:
+          type: number
+          format: decimal
+        currency:
+          type: string
+        shipping_address:
+          type: object
+        billing_address:
+          type: object
+        notes:
+          type: string
+        meta_data:
+          type: object
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItemResponse'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        confirmed_at:
+          type: string
+          format: date-time
+        shipped_at:
+          type: string
+          format: date-time
+        delivered_at:
+          type: string
+          format: date-time
+        cancelled_at:
+          type: string
+          format: date-time
+
+    ReturnItemCreate:
+      type: object
+      required:
+        - order_item_id
+        - product_id
+        - product_name
+        - product_sku
+        - quantity
+      properties:
+        order_item_id:
+          type: integer
+          description: Original order item ID
+        product_id:
+          type: integer
+        product_name:
+          type: string
+        product_sku:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        condition:
+          type: string
+          description: Item condition (new, used, damaged, etc.)
+        condition_notes:
+          type: string
+
+    ReturnItemResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        order_item_id:
+          type: integer
+        product_id:
+          type: integer
+        product_name:
+          type: string
+        product_sku:
+          type: string
+        quantity:
+          type: integer
+        refund_amount:
+          type: number
+          format: decimal
+        condition:
+          type: string
+        condition_notes:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    ReturnCreate:
+      type: object
+      required:
+        - order_id
+        - reason
+        - items
+      properties:
+        order_id:
+          type: integer
+          description: Original order ID
+        reason:
+          $ref: '#/components/schemas/ReturnReason'
+        reason_description:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ReturnItemCreate'
+        return_address:
+          type: object
+        notes:
+          type: string
+        meta_data:
+          type: object
+
+    ReturnUpdate:
+      type: object
+      properties:
+        notes:
+          type: string
+        tracking_number:
+          type: string
+        meta_data:
+          type: object
+
+    ReturnStateUpdate:
+      type: object
+      required:
+        - action
+      properties:
+        action:
+          type: string
+          description: State transition action
+          enum:
+            - approve
+            - schedule_pickup
+            - start_transit
+            - receive
+            - process
+            - refund
+            - reject
+            - cancel
+        reason:
+          type: string
+          description: Reason for rejection or other actions
+        meta_data:
+          type: object
+
+    ReturnResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        return_number:
+          type: string
+        order_id:
+          type: integer
+        status:
+          $ref: '#/components/schemas/ReturnStatus'
+        previous_status:
+          $ref: '#/components/schemas/ReturnStatus'
+        reason:
+          $ref: '#/components/schemas/ReturnReason'
+        reason_description:
+          type: string
+        refund_amount:
+          type: number
+          format: decimal
+        refund_method:
+          type: string
+        currency:
+          type: string
+        return_address:
+          type: object
+        tracking_number:
+          type: string
+        notes:
+          type: string
+        rejection_reason:
+          type: string
+        meta_data:
+          type: object
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReturnItemResponse'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        approved_at:
+          type: string
+          format: date-time
+        pickup_scheduled_at:
+          type: string
+          format: date-time
+        received_at:
+          type: string
+          format: date-time
+        processed_at:
+          type: string
+          format: date-time
+        refunded_at:
+          type: string
+          format: date-time
+
+    PaymentCreate:
+      type: object
+      required:
+        - order_id
+        - method
+        - amount
+      properties:
+        order_id:
+          type: integer
+        method:
+          $ref: '#/components/schemas/PaymentMethod'
+        amount:
+          type: number
+          format: decimal
+        currency:
+          type: string
+          default: USD
+        transaction_id:
+          type: string
+        meta_data:
+          type: object
+
+    PaymentUpdate:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+        gateway_response:
+          type: object
+        notes:
+          type: string
+        meta_data:
+          type: object
+
+    RefundRequest:
+      type: object
+      properties:
+        amount:
+          type: number
+          format: decimal
+          description: Partial refund amount. If null, full refund.
+        reason:
+          type: string
+        meta_data:
+          type: object
+
+    PaymentResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        payment_number:
+          type: string
+        order_id:
+          type: integer
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        method:
+          $ref: '#/components/schemas/PaymentMethod'
+        amount:
+          type: number
+          format: decimal
+        currency:
+          type: string
+        refunded_amount:
+          type: number
+          format: decimal
+        transaction_id:
+          type: string
+        gateway_response:
+          type: object
+        notes:
+          type: string
+        meta_data:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        refunded_at:
+          type: string
+          format: date-time
+
+    InvoiceResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        invoice_number:
+          type: string
+        invoice_type:
+          $ref: '#/components/schemas/InvoiceType'
+        order_id:
+          type: integer
+        return_id:
+          type: integer
+        file_path:
+          type: string
+        file_name:
+          type: string
+        file_size:
+          type: integer
+        notes:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Error message
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Invalid request parameters"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Resource not found"
+
+    UnprocessableEntity:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Validation error"
+
