@@ -1,0 +1,33 @@
+[run]
+source = app
+omit = 
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */migrations/*
+    */alembic/*
+    */venv/*
+    */env/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @property
+    def __.*__
+
+precision = 2
+show_missing = True
+skip_covered = False
+
+[html]
+directory = coverage_html
+
+[xml]
+output = coverage.xml
+
